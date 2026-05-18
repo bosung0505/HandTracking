@@ -1,4 +1,5 @@
 using UnityEngine;
+using DG.Tweening;
 
 public class BoardRotator : MonoBehaviour
 {
@@ -31,8 +32,11 @@ public class BoardRotator : MonoBehaviour
     private Vector2 smoothedHandPos;
     private Vector2 lastHandPos;
 
+    private Quaternion initialRotation;
+
     void Start()
     {
+        initialRotation = transform.rotation;
         targetRotation = transform.rotation;
         targetScale = transform.localScale.x;
         if (udpReceiver == null) udpReceiver = FindObjectOfType<UDPReceiver>();
@@ -40,6 +44,9 @@ public class BoardRotator : MonoBehaviour
 
     void Update()
     {
+        // 스테이지 클리어 연출 중에는 조작 잠금
+        if (GameManager.Instance != null && GameManager.Instance.currentState == GameState.StageClear) return;
+
         float inputX = 0f;
         float inputY = 0f;
         float zoomInput = 0f;
@@ -155,5 +162,15 @@ public class BoardRotator : MonoBehaviour
         }
         float currentScale = Mathf.Lerp(transform.localScale.x, targetScale, Time.deltaTime * zoomSmoothFactor);
         transform.localScale = new Vector3(currentScale, currentScale, currentScale);
+    }
+
+    public void ResetRotation(float duration)
+    {
+        isDragging = false;
+        isZooming = false;
+        targetRotation = initialRotation;
+        
+        transform.DOKill();
+        transform.DORotateQuaternion(initialRotation, duration).SetEase(Ease.InOutQuad);
     }
 }

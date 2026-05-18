@@ -45,6 +45,9 @@ public class SpawnManager : MonoBehaviour
 
     private IEnumerator SpawnSequence(int stage)
     {
+        // 스테이지 UI 표시
+        if (StageManager.Instance != null) StageManager.Instance.ShowStageUI(stage);
+
         // 1. 블랙홀 스케일 초기화 및 스폰 시작 위치 지정
         Vector3 topCenter = topBlackHole != null ? topBlackHole.transform.localPosition : new Vector3(0, GridManager.Instance.faceDistance, 0);
         Vector3 bottomCenter = bottomBlackHole != null ? bottomBlackHole.transform.localPosition : new Vector3(0, -GridManager.Instance.faceDistance, 0);
@@ -74,16 +77,39 @@ public class SpawnManager : MonoBehaviour
         SpawnPiece(playerPiecePrefab, Vector3.up, playerCoords[0], topCenter, true);
         yield return new WaitForSeconds(0.2f);
 
-        // --- 적군 기물 생성 (아랫면, 스테이지 비례) ---
-        int enemyCount = stage; 
-        if (enemyCount > 12) enemyCount = 12; // 테두리 12칸이 최대이므로 제한
-        
+        // --- 적군 기물 생성 (스테이지 데이터 비례) ---
         List<Vector2Int> enemyCoords = new List<Vector2Int>(spawnCoords);
         Shuffle(enemyCoords);
-        for (int i = 0; i < enemyCount; i++)
+        int coordIndex = 0;
+
+        if (StageManager.Instance != null)
         {
-            SpawnPiece(enemyPiecePrefab, Vector3.down, enemyCoords[i], bottomCenter, false);
-            yield return new WaitForSeconds(0.2f); // 따닥따닥 튀어나오는 느낌
+            StageData stageData = StageManager.Instance.GetStageData(stage);
+            if (stageData != null)
+            {
+                foreach (var enemyData in stageData.enemies)
+                {
+                    for (int i = 0; i < enemyData.count; i++)
+                    {
+                        if (coordIndex >= enemyCoords.Count) break; // 최대 12칸 안전장치
+                        
+                        SpawnPiece(enemyData.enemyPrefab, Vector3.down, enemyCoords[coordIndex], bottomCenter, false);
+                        coordIndex++;
+                        yield return new WaitForSeconds(0.2f);
+                    }
+                }
+            }
+        }
+        else
+        {
+            // StageManager가 없을 경우를 대비한 기존 로직 유지
+            int enemyCount = stage; 
+            if (enemyCount > 12) enemyCount = 12; 
+            for (int i = 0; i < enemyCount; i++)
+            {
+                SpawnPiece(enemyPiecePrefab, Vector3.down, enemyCoords[i], bottomCenter, false);
+                yield return new WaitForSeconds(0.2f);
+            }
         }
 
         // 마지막 기물이 착지할 때까지 대기
@@ -98,8 +124,11 @@ public class SpawnManager : MonoBehaviour
 
         yield return new WaitForSeconds(1.0f);
 
-        // 4. 스폰 시퀀스 종료 및 게임(플레이어 턴) 시작
-        GameManager.Instance.ChangeState(GameState.PlayerTurn);
+        // 스테이지 UI 숨기기
+        if (StageManager.Instance != null) StageManager.Instance.HideStageUI();
+
+        // 4. 스폰 시퀀스 종료 및 턴 전환 연출 시작
+        GameManager.Instance.ChangeState(GameState.PlayerTurnTransition);
     }
 
     private void SpawnPiece(GameObject prefab, Vector3 normal, Vector2Int gridCoord, Vector3 startPos, bool isPlayer = false)

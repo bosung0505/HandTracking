@@ -1,5 +1,6 @@
 using UnityEngine;
 using System.Collections.Generic;
+using DG.Tweening;
 
 public class ChessPieceController : MonoBehaviour
 {
@@ -15,6 +16,15 @@ public class ChessPieceController : MonoBehaviour
     public GridPos turnStartGridPos;
     private List<GridPos> validMoves = new List<GridPos>();
 
+    [Header("Combat Settings")]
+    public int maxHP = 1;
+    public int currentHP = 1;
+    public int attackPower = 1;
+    
+    [Header("Combat Effects (Prefabs)")]
+    public GameObject hitEffectPrefab;
+    public GameObject slamEffectPrefab; // 플레이어 전용 (내려찍기 이펙트)
+
     [Header("Board Settings")]
     [Tooltip("체스 판 정육면체 오브젝트")]
     public Transform board;
@@ -29,6 +39,10 @@ public class ChessPieceController : MonoBehaviour
     public float hoverHeight = 0.5f; 
     public float dropSpeed = 15f;    
     public float scaleSpeed = 10f; // 부드러운 스케일링을 위한 속도
+
+    [Header("Squish Settings")]
+    public float squishScaleY = 0.2f;
+    private bool isSquished = false;
 
     [Header("Outline Settings")]
     [Tooltip("외곽선 색상")]
@@ -58,6 +72,7 @@ public class ChessPieceController : MonoBehaviour
     {
         pieceCollider = GetComponent<Collider>();
         originalScale = transform.localScale;
+        currentHP = maxHP; // 스폰 시 최대 체력으로 초기화
 
         if (board != null)
         {
@@ -132,6 +147,9 @@ public class ChessPieceController : MonoBehaviour
 
     public void Grab()
     {
+        // 공격 등 특정 상태에서는 입력 차단
+        if (GameManager.Instance != null && GameManager.Instance.currentState == GameState.PlayerAttacking) return;
+        
         // 적군 기물이면 잡지 못함
         if (!isPlayerPiece) return;
         // 턴이 아니면 잡지 못함
@@ -246,12 +264,39 @@ public class ChessPieceController : MonoBehaviour
             }
         }
 
-        // 3. 부드러운 스케일링 로직 (hoverScaleMultiplier 적용)
-        float targetScaleMultiplier = (isHovered || isDragging) ? hoverScaleMultiplier : 1.0f;
-        Vector3 targetScale = originalScale * targetScaleMultiplier;
-        transform.localScale = Vector3.Lerp(transform.localScale, targetScale, Time.deltaTime * scaleSpeed);
+        // [신규] 3. 찌부러짐(Squish) 판정: 턴 확정 전 플레이어가 밟았을 때
+        if (!isPlayerPiece && !isSpawning)
+        {
+            ChessPieceController player = null;
+            ChessPieceController[] allPieces = FindObjectsByType<ChessPieceController>(FindObjectsSortMode.None);
+            foreach(var p in allPieces) if (p.isPlayerPiece) player = p;
 
-        // 3. 이동 및 회전 로직
+            if (player != null)
+            {
+                // 드래그 중이 아니며, 플레이어 턴이고, 좌표가 겹친다면
+                bool shouldSquish = (!player.GetIsDragging() && player.currentGridPos.Equals(this.currentGridPos) && GameManager.Instance != null && GameManager.Instance.currentState == GameState.PlayerTurn);
+                
+                if (shouldSquish && !isSquished)
+                {
+                    isSquished = true;
+                    SetAlpha(0.5f);
+                }
+                else if (!shouldSquish && isSquished)
+                {
+                    isSquished = false;
+                    SetAlpha(1.0f);
+                }
+            }
+        }
+
+        // 4. 부드러운 스케일링 로직 (hoverScaleMultiplier 및 Squish 적용)
+        float targetScaleMultiplier = (isHovered || isDragging) ? hoverScaleMultiplier : 1.0f;
+        Vector3 targetScaleVec = originalScale * targetScaleMultiplier;
+        if (isSquished) targetScaleVec.y = originalScale.y * squishScaleY; // Y축만 납작하게 덮어씌움
+        
+        transform.localScale = Vector3.Lerp(transform.localScale, targetScaleVec, Time.deltaTime * scaleSpeed);
+
+        // 5. 이동 및 회전 로직
         if (isDragging)
         {
             transform.localPosition = baseLocalPosition + (currentLocalNormal * hoverHeight);
@@ -339,6 +384,8 @@ public class ChessPieceController : MonoBehaviour
         List<GridPos> moves = new List<GridPos>();
         int[][] dirs = new int[][] { new int[]{1,0}, new int[]{-1,0}, new int[]{0,1}, new int[]{0,-1} };
         
+        ChessPieceController[] allPieces = FindObjectsByType<ChessPieceController>(FindObjectsSortMode.None);
+
         foreach(var d in dirs)
         {
             for (int i = 1; i <= 7; i++)
@@ -348,8 +395,21 @@ public class ChessPieceController : MonoBehaviour
                 int ny = turnStartGridPos.y + d[1] * i;
                 if (nx >= 0 && nx <= 7 && ny >= 0 && ny <= 7)
                 {
-                    // TODO: 나중에 적군/아군 판별 로직 추가 시 진행 멈춤 제어 필요
-                    moves.Add(new GridPos(turnStartGridPos.face, nx, ny));
+                    GridPos checkPos = new GridPos(turnStartGridPos.face, nx, ny);
+                    moves.Add(checkPos);
+
+                    // 다른 기물에 가로막혀 있는지 검사 (딱 그 기물이 있는 위치까지만 이동 가능)
+                    bool isBlocked = false;
+                    foreach (var p in allPieces)
+                    {
+                        if (p != this && p != null && p.gameObject.activeSelf && p.currentGridPos.Equals(checkPos))
+                        {
+                            isBlocked = true;
+                            break;
+                        }
+                    }
+
+                    if (isBlocked) break; // 가로막혔으므로 더 이상 이 방향으로 전진 불가
                 }
                 else
                 {
@@ -366,5 +426,114 @@ public class ChessPieceController : MonoBehaviour
             }
         }
         return moves;
+    }
+
+    public void TakeDamage(int damage, Vector3 attackSourceLocalPos)
+    {
+        currentHP -= damage;
+
+        // 피격 이펙트 스폰 (자신의 월드 위치)
+        if (hitEffectPrefab != null)
+        {
+            Instantiate(hitEffectPrefab, transform.position, Quaternion.identity);
+        }
+
+        // 넉백 방향 계산 (공격 출처에서 자신을 향하는 벡터, 로컬 평면 상에 투영)
+        Vector3 pushDir = (transform.localPosition - attackSourceLocalPos).normalized;
+        pushDir -= Vector3.Project(pushDir, currentLocalNormal); // 수직 성분 제거
+        pushDir.Normalize();
+
+        Vector3 punchPos = baseLocalPosition + pushDir * 0.3f; // 0.3f 만큼 밀려남
+
+        isSpawning = true; // Update 루프의 보간 로직 멈춤
+        transform.DOKill();
+
+        if (currentHP <= 0)
+        {
+            // 사망 시: 밀려나고 서서히 투명해지며 파괴
+            Sequence seq = DOTween.Sequence();
+            seq.Append(transform.DOLocalMove(punchPos, 0.2f).SetEase(Ease.OutExpo));
+            
+            // 알파값 페이드 아웃 (Material이 투명도를 지원해야 함)
+            Renderer[] renderers = GetComponentsInChildren<Renderer>();
+            foreach (var r in renderers)
+            {
+                if (r.material.HasProperty("_Color"))
+                {
+                    r.material.DOFade(0f, 0.5f);
+                }
+            }
+            
+            seq.AppendInterval(0.5f);
+            seq.OnComplete(() => {
+                Destroy(gameObject);
+            });
+        }
+        else
+        {
+            // 생존 시: 팍! 밀렸다가 다시 제자리로 돌아옴
+            Sequence seq = DOTween.Sequence();
+            seq.Append(transform.DOLocalMove(punchPos, 0.2f).SetEase(Ease.OutExpo));
+            seq.Append(transform.DOLocalMove(baseLocalPosition, 0.2f).SetEase(Ease.OutBack));
+            seq.OnComplete(() => {
+                isSpawning = false; // 보간 로직 복구
+            });
+        }
+    }
+
+    // 플레이어에게 정수리를 밟혔을 때 즉사하는 연출
+    public void TakeFatalDamage()
+    {
+        currentHP = 0;
+        isSpawning = true; // Update 루프의 보간 강제 정지
+        transform.DOKill(); // 기존 모든 애니메이션 즉시 정지
+
+        if (hitEffectPrefab != null)
+        {
+            Instantiate(hitEffectPrefab, transform.position, Quaternion.identity);
+        }
+
+        // 종잇장처럼 순식간에 납작해지며 즉사
+        Sequence seq = DOTween.Sequence();
+        seq.Append(transform.DOScaleY(0f, 0.1f).SetEase(Ease.InExpo));
+        seq.OnComplete(() => {
+            Destroy(gameObject);
+        });
+    }
+
+    public bool GetIsDragging()
+    {
+        return isDragging;
+    }
+
+    private void SetAlpha(float alpha)
+    {
+        Renderer[] renderers = GetComponentsInChildren<Renderer>();
+        foreach (var r in renderers)
+        {
+            if (outlineObject != null && r.gameObject == outlineObject) continue;
+            
+            if (r.material.HasProperty("_Color"))
+            {
+                r.material.DOFade(alpha, 0.2f);
+            }
+        }
+    }
+
+    // 스테이지 클리어 시 솟구쳐 오르며 사라지는 연출
+    public void RocketLaunchAndDestroy()
+    {
+        isSpawning = true; // Update 루프의 위치 보정 정지
+        if (pieceCollider != null) pieceCollider.enabled = false; // 선택 및 물리 방지
+        
+        transform.DOKill();
+        
+        // 위로 아주 높이 발사 (현재 큐브 면의 수직 방향으로 20만큼)
+        Vector3 targetPos = baseLocalPosition + (currentLocalNormal * 20f); 
+        
+        // 처음엔 천천히, 나중엔 급가속 (InExpo)
+        transform.DOLocalMove(targetPos, 1.5f).SetEase(Ease.InExpo).OnComplete(() => {
+            Destroy(gameObject);
+        });
     }
 }
