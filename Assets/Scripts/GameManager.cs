@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using DG.Tweening;
 
+// ── [내 브랜치] 턴 전환 연출 상태 포함한 완전한 열거형 ──────────
 public enum GameState
 {
     Init,
@@ -19,7 +20,8 @@ public enum GameState
 public class GameManager : MonoBehaviour
 {
     public static GameManager Instance { get; private set; }
-    
+
+    [Header("스테이지")]
     public GameState currentState;
     public int currentStage = 1;
 
@@ -31,21 +33,27 @@ public class GameManager : MonoBehaviour
 
     private void Start()
     {
-        // 임시로 게임 시작 시 바로 스폰 시퀀스 진입
+        // 플레이어 사망 이벤트 구독
+        if (PlayerStats.Instance != null)
+            PlayerStats.Instance.onDead.AddListener(() => ChangeState(GameState.GameOver));
+
         ChangeState(GameState.SpawningPieces);
+    }
+
+    private void Update()
+    {
+        // 테스트용 - 빌드 전 제거
+        if (Input.GetKeyDown(KeyCode.Space))
+            ChangeState(GameState.StageClear);
     }
 
     public void ChangeState(GameState newState)
     {
         currentState = newState;
-        
         switch (currentState)
         {
             case GameState.SpawningPieces:
-                if (SpawnManager.Instance != null)
-                {
-                    SpawnManager.Instance.StartSpawning(currentStage);
-                }
+                SpawnManager.Instance?.StartSpawning(currentStage);
                 break;
             case GameState.PlayerTurnTransition:
                 StartCoroutine(TurnTransitionRoutine(true, GameState.PlayerTurn));
@@ -60,7 +68,6 @@ public class GameManager : MonoBehaviour
                 StartCoroutine(TurnTransitionRoutine(false, GameState.EnemyTurn));
                 break;
             case GameState.EnemyTurn:
-                Debug.Log("=== 적 턴 시작! ===");
                 StartCoroutine(EnemyTurnRoutine());
                 break;
             case GameState.StageClear:
@@ -72,25 +79,67 @@ public class GameManager : MonoBehaviour
         }
     }
 
-    // UI 버튼(END 버튼)의 OnClick 이벤트에 연결할 메서드
+    // ── END 턴 버튼 ──────────────────────────────────────────────
+
     public void OnEndTurnButtonClicked()
     {
-        if (currentState == GameState.PlayerTurn)
-        {
-            ChangeState(GameState.PlayerAttacking);
-        }
+        if (currentState != GameState.PlayerTurn) return;
+
+        ChessPieceController player = null;
+        foreach (var p in FindObjectsOfType<ChessPieceController>())
+            if (p.isPlayerPiece) { player = p; p.CommitMove(); }
+
+        // PlayerAttackRoutine이 공격 연출 + 상태 전환을 처리함
+        if (player != null && PlayerStats.Instance != null)
+            AttackEnemiesInRange(player.currentGridPos,
+                PlayerStats.Instance.attackPower,
+                PlayerStats.Instance.attackRange);
+
+        StartCoroutine(CheckAfterAttack());
+    }
+
+    private IEnumerator CheckAfterAttack()
+    {
+        // PlayerAttackRoutine이 실행 중이면 완료될 때까지 대기
+        while (currentState == GameState.PlayerAttacking)
+            yield return null;
+
+        // PlayerAttackRoutine이 이미 다음 상태(EnemyTurnTransition/StageClear)로
+        // 전환했으면 중복 처리하지 않음
+        if (currentState == GameState.EnemyTurnTransition ||
+            currentState == GameState.EnemyTurn          ||
+            currentState == GameState.StageClear         ||
+            currentState == GameState.GameOver)
+            yield break;
+
+        // 안전망: PlayerAttacking 상태를 거치지 않은 경우 직접 처리
+        yield return new WaitForSeconds(0.5f);
+        if (AreAllEnemiesDefeated()) ChangeState(GameState.StageClear);
+        else ChangeState(GameState.EnemyTurn);
+    }
+
+    // ── 플레이어 공격 ────────────────────────────────────────────
+
+    private void AttackEnemiesInRange(GridPos attackerPos, int power, int range)
+    {
+        // PlayerAttackRoutine(내려찍기 연출)이 실제 공격 범위 계산 및 데미지를 처리함
+        ChangeState(GameState.PlayerAttacking);
     }
 
     private IEnumerator PlayerAttackRoutine()
     {
         ChessPieceController[] allPieces = FindObjectsByType<ChessPieceController>(FindObjectsSortMode.None);
         ChessPieceController player = null;
-        List<ChessPieceController> enemies = new List<ChessPieceController>();
-        
+        var enemies = new List<ChessPieceController>();
+
         foreach (var p in allPieces)
         {
             if (p.isPlayerPiece) player = p;
-            else enemies.Add(p);
+            else
+            {
+                EnemyController ec = p.GetComponent<EnemyController>();
+                if (ec == null || !ec.isDead) enemies.Add(p);
+            }
         }
 
         if (player == null)
@@ -105,11 +154,11 @@ public class GameManager : MonoBehaviour
         // 1. 내려찍기 연출 (DOTween)
         player.isSpawning = true; // Update 루프 보간 차단 (애니메이션 충돌 방지)
         Vector3 originalLocalPos = player.transform.localPosition;
-        
+
         // transform.up은 월드 좌표계이므로, 로컬 좌표계 기준의 위쪽 방향을 구합니다.
-        Vector3 localUp = player.transform.localRotation * Vector3.up; 
+        Vector3 localUp = player.transform.localRotation * Vector3.up;
         Vector3 upLocalPos = originalLocalPos + (localUp * 1.5f); // 해당 면의 수직 방향으로 떠오름
-        
+
         player.transform.DOKill();
         // 천천히 떠오르기
         player.transform.DOLocalMove(upLocalPos, 0.6f).SetEase(Ease.OutQuad);
@@ -193,90 +242,23 @@ public class GameManager : MonoBehaviour
         }
     }
 
-    private IEnumerator TurnTransitionRoutine(bool isPlayerTurn, GameState nextState)
+    // ── 업그레이드 완료 콜백 (UpgradePanelUI에서 호출) ──────────
+    // [팀원 추가] 업그레이드 선택 후 다음 스테이지로 진행하는 콜백
+
+    public void OnUpgradeComplete()
     {
-        // 턴 UI 표시
-        if (StageManager.Instance != null)
-        {
-            StageManager.Instance.ShowTurnUI(isPlayerTurn);
-        }
-        
-        // 1.5초간 대기 (이 상태에서는 PlayerTurn이 아니므로 조작이 막힘)
-        yield return new WaitForSeconds(1.5f);
-        
-        // 턴 UI 숨기기
-        if (StageManager.Instance != null)
-        {
-            StageManager.Instance.HideTurnUI(isPlayerTurn);
-        }
-        
-        // 실제 턴으로 진입
-        ChangeState(nextState);
-    }
-
-    private IEnumerator StageClearRoutine()
-    {
-        Debug.Log("=== 스테이지 클리어! ===");
-        
-        ChessPieceController[] allPieces = FindObjectsByType<ChessPieceController>(FindObjectsSortMode.None);
-        ChessPieceController player = null;
-        foreach (var p in allPieces)
-        {
-            if (p != null && p.isPlayerPiece) player = p;
-        }
-
-        if (player != null)
-        {
-            player.RocketLaunchAndDestroy();
-            yield return new WaitForSeconds(2.0f);
-        }
-
-        BoardRotator rotator = FindObjectOfType<BoardRotator>();
-        if (rotator != null)
-        {
-            rotator.ResetRotation(1.5f);
-            yield return new WaitForSeconds(1.5f);
-        }
-
         currentStage++;
         ChangeState(GameState.SpawningPieces);
     }
 
-    private IEnumerator GameOverRoutine()
-    {
-        Debug.Log("=== 게임 오버! ===");
+    // ── 적 턴 (폰 + 비숍 AI) ─────────────────────────────────────
 
-        // 게임 오버 UI 표시
-        if (StageManager.Instance != null)
-            StageManager.Instance.ShowGameOverUI();
-
-        yield return new WaitForSeconds(3.0f);
-
-        // 남은 기물 전부 정리
-        ChessPieceController[] allPieces = FindObjectsByType<ChessPieceController>(FindObjectsSortMode.None);
-        foreach (var p in allPieces)
-        {
-            if (p != null) Destroy(p.gameObject);
-        }
-
-        // 게임 오버 UI 숨기기
-        if (StageManager.Instance != null)
-            StageManager.Instance.HideGameOverUI();
-
-        yield return new WaitForSeconds(0.5f);
-
-        // 스테이지 1부터 재시작
-        currentStage = 1;
-        ChangeState(GameState.SpawningPieces);
-    }
-
-    // 적 턴 BFS AI 코루틴
     private IEnumerator EnemyTurnRoutine()
     {
         ChessPieceController[] allPieces = FindObjectsByType<ChessPieceController>(FindObjectsSortMode.None);
         ChessPieceController player = null;
         List<ChessPieceController> enemies = new List<ChessPieceController>();
-        
+
         foreach (var p in allPieces)
         {
             if (p.isPlayerPiece) player = p;
@@ -478,5 +460,98 @@ public class GameManager : MonoBehaviour
 
         piece.InitializeAfterSpawn(targetPos, targetRot);
     }
-}
 
+    private IEnumerator TurnTransitionRoutine(bool isPlayerTurn, GameState nextState)
+    {
+        // 턴 UI 표시
+        if (StageManager.Instance != null)
+        {
+            StageManager.Instance.ShowTurnUI(isPlayerTurn);
+        }
+
+        // 1.5초간 대기 (이 상태에서는 PlayerTurn이 아니므로 조작이 막힘)
+        yield return new WaitForSeconds(1.5f);
+
+        // 턴 UI 숨기기
+        if (StageManager.Instance != null)
+        {
+            StageManager.Instance.HideTurnUI(isPlayerTurn);
+        }
+
+        // 실제 턴으로 진입
+        ChangeState(nextState);
+    }
+
+    private IEnumerator StageClearRoutine()
+    {
+        Debug.Log("=== 스테이지 클리어! ===");
+
+        ChessPieceController[] allPieces = FindObjectsByType<ChessPieceController>(FindObjectsSortMode.None);
+        ChessPieceController player = null;
+        foreach (var p in allPieces)
+        {
+            if (p != null && p.isPlayerPiece) player = p;
+        }
+
+        if (player != null)
+        {
+            player.RocketLaunchAndDestroy();
+            yield return new WaitForSeconds(2.0f);
+        }
+
+        BoardRotator rotator = FindObjectOfType<BoardRotator>();
+        if (rotator != null)
+        {
+            rotator.ResetRotation(1.5f);
+            yield return new WaitForSeconds(1.5f);
+        }
+
+        // [팀원 추가] 스테이지 클리어 시 플레이어 HP 전체 회복
+        PlayerStats.Instance?.FullHeal();
+
+        currentStage++;
+        ChangeState(GameState.SpawningPieces);
+    }
+
+    private IEnumerator GameOverRoutine()
+    {
+        Debug.Log("=== 게임 오버! ===");
+
+        // 게임 오버 UI 표시
+        if (StageManager.Instance != null)
+            StageManager.Instance.ShowGameOverUI();
+
+        yield return new WaitForSeconds(3.0f);
+
+        // 남은 기물 전부 정리
+        ChessPieceController[] allPieces = FindObjectsByType<ChessPieceController>(FindObjectsSortMode.None);
+        foreach (var p in allPieces)
+        {
+            if (p != null) Destroy(p.gameObject);
+        }
+
+        // 게임 오버 UI 숨기기
+        if (StageManager.Instance != null)
+            StageManager.Instance.HideGameOverUI();
+
+        yield return new WaitForSeconds(0.5f);
+
+        // 스테이지 1부터 재시작
+        currentStage = 1;
+        ChangeState(GameState.SpawningPieces);
+    }
+
+    // ── 적 전원 처치 확인 ────────────────────────────────────────
+    // [팀원 추가] CheckAfterAttack()에서 호출되는 유틸리티 메서드
+
+    private bool AreAllEnemiesDefeated()
+    {
+        foreach (var p in FindObjectsOfType<ChessPieceController>())
+        {
+            if (p.isPlayerPiece) continue;
+            EnemyController ec = p.GetComponent<EnemyController>();
+            if (ec == null || !ec.isDead) return false;
+        }
+        return true;
+    }
+}
