@@ -66,6 +66,9 @@ public class GameManager : MonoBehaviour
             case GameState.StageClear:
                 StartCoroutine(StageClearRoutine());
                 break;
+            case GameState.GameOver:
+                StartCoroutine(GameOverRoutine());
+                break;
         }
     }
 
@@ -224,12 +227,10 @@ public class GameManager : MonoBehaviour
 
         if (player != null)
         {
-            // 플레이어 승천
             player.RocketLaunchAndDestroy();
-            yield return new WaitForSeconds(2.0f); // 날아가는 시간 대기
+            yield return new WaitForSeconds(2.0f);
         }
 
-        // 보드 회전 리셋
         BoardRotator rotator = FindObjectOfType<BoardRotator>();
         if (rotator != null)
         {
@@ -237,8 +238,35 @@ public class GameManager : MonoBehaviour
             yield return new WaitForSeconds(1.5f);
         }
 
-        // 스테이지 증가 및 다음 스테이지 시작
         currentStage++;
+        ChangeState(GameState.SpawningPieces);
+    }
+
+    private IEnumerator GameOverRoutine()
+    {
+        Debug.Log("=== 게임 오버! ===");
+
+        // 게임 오버 UI 표시
+        if (StageManager.Instance != null)
+            StageManager.Instance.ShowGameOverUI();
+
+        yield return new WaitForSeconds(3.0f);
+
+        // 남은 기물 전부 정리
+        ChessPieceController[] allPieces = FindObjectsByType<ChessPieceController>(FindObjectsSortMode.None);
+        foreach (var p in allPieces)
+        {
+            if (p != null) Destroy(p.gameObject);
+        }
+
+        // 게임 오버 UI 숨기기
+        if (StageManager.Instance != null)
+            StageManager.Instance.HideGameOverUI();
+
+        yield return new WaitForSeconds(0.5f);
+
+        // 스테이지 1부터 재시작
+        currentStage = 1;
         ChangeState(GameState.SpawningPieces);
     }
 
@@ -252,97 +280,203 @@ public class GameManager : MonoBehaviour
         foreach (var p in allPieces)
         {
             if (p.isPlayerPiece) player = p;
-            else if (p != null && p.currentHP > 0) // 파괴되었거나 죽은 적 제외
-            {
+            else if (p != null && p.currentHP > 0)
                 enemies.Add(p);
+        }
+
+        if (player == null) { ChangeState(GameState.PlayerTurn); yield break; }
+
+        // ===== [Phase 1] 공격 체크 (이동 전, enemies 순서대로 순차 처리) =====
+        int[][] diagDirs  = new int[][] { new int[]{1,1}, new int[]{1,-1}, new int[]{-1,1}, new int[]{-1,-1} };
+        int[][] cardDirs  = new int[][] { new int[]{1,0}, new int[]{-1,0}, new int[]{0,1},  new int[]{0,-1}  };
+        HashSet<ChessPieceController> attackerSet = new HashSet<ChessPieceController>();
+
+        foreach (var enemy in enemies)
+        {
+            if (enemy == null) continue;
+
+            // ── 폰: 대각선 1칸 공격 ──
+            if (enemy.enemyType == ChessPieceController.EnemyType.Pawn)
+            {
+                bool isAttacker = false;
+                foreach (var d in diagDirs)
+                {
+                    int nx = enemy.currentGridPos.x + d[0];
+                    int ny = enemy.currentGridPos.y + d[1];
+                    if (nx < 0 || nx > 7 || ny < 0 || ny > 7) continue;
+                    if (new GridPos(enemy.currentGridPos.face, nx, ny).Equals(player.currentGridPos))
+                    { isAttacker = true; break; }
+                }
+                if (!isAttacker) continue;
+
+                attackerSet.Add(enemy);
+                enemy.PerformAttackAnimation(player.transform.localPosition);
+                yield return new WaitForSeconds(0.43f);
+                if (player != null && player.currentHP > 0)
+                    player.TakeDamage(enemy.attackPower, enemy.transform.localPosition);
+                yield return new WaitForSeconds(0.5f);
+                if (currentState == GameState.GameOver) yield break;
+            }
+            // ── 비숍: 대각선 스캔 → 바로 앞 타일로 슬라이드 → 박치기 ──
+            else if (enemy.enemyType == ChessPieceController.EnemyType.Bishop)
+            {
+                GridPos launchPos = GridPos.Invalid;
+                foreach (var d in diagDirs)
+                {
+                    GridPos last = enemy.currentGridPos;
+                    for (int step = 1; step <= 7; step++)
+                    {
+                        int nx = last.x + d[0]; int ny = last.y + d[1];
+                        if (nx < 0 || nx > 7 || ny < 0 || ny > 7) break; // 면 끝
+                        GridPos cand = new GridPos(enemy.currentGridPos.face, nx, ny);
+                        if (cand.Equals(player.currentGridPos)) { launchPos = last; break; } // 플레이어 발견
+                        bool blocked = false;
+                        foreach (var e2 in enemies) if (e2 != null && e2 != enemy && e2.currentGridPos.Equals(cand)) { blocked = true; break; }
+                        if (blocked) break;
+                        last = cand;
+                    }
+                    if (!launchPos.Equals(GridPos.Invalid)) break;
+                }
+                if (launchPos.Equals(GridPos.Invalid)) continue; // 공격 불가
+
+                attackerSet.Add(enemy);
+
+                // 1. launchPos까지 슬라이드
+                Vector3 launchNormal = GridManager.Instance.GetNormalFromFace(launchPos.face);
+                Vector3 launchLocalPos = GridManager.Instance.GetLocalPosition(launchNormal, launchPos.x, launchPos.y, enemy.board);
+                Quaternion launchRot = Quaternion.FromToRotation(Vector3.up, launchNormal);
+
+                enemy.isSpawning = true;
+                enemy.transform.DOKill();
+                enemy.transform.DOLocalMove(launchLocalPos, 0.45f).SetEase(Ease.OutCubic);
+                enemy.transform.DOLocalRotateQuaternion(launchRot, 0.45f);
+                yield return new WaitForSeconds(0.45f);
+                enemy.InitializeAfterSpawn(launchLocalPos, launchRot); // 내부 좌표 갱신
+
+                // 2. 박치기
+                enemy.PerformAttackAnimation(player.transform.localPosition);
+                yield return new WaitForSeconds(0.43f);
+                if (player != null && player.currentHP > 0)
+                    player.TakeDamage(enemy.attackPower, enemy.transform.localPosition);
+                yield return new WaitForSeconds(0.5f);
+                if (currentState == GameState.GameOver) yield break;
             }
         }
 
-        if (player == null)
-        {
-            ChangeState(GameState.PlayerTurn);
-            yield break;
-        }
-
-        // 1. BFS 거리맵 생성 (플레이어 룩 위치가 0)
+        // ===== [Phase 2] 이동 (공격하지 않은 기물만) =====
         var flowField = GridManager.Instance.GenerateFlowField(player.currentGridPos);
 
-        // [신규] 예약(점유) 타일 목록 생성: 현재 적들의 위치로 초기화
         HashSet<GridPos> reservedTiles = new HashSet<GridPos>();
         foreach (var enemy in enemies)
-        {
             if (enemy != null) reservedTiles.Add(enemy.currentGridPos);
-        }
-        // 플레이어 자리로 겹쳐서 들어가는 것 방지 (포획 미구현이므로)
         reservedTiles.Add(player.currentGridPos);
 
-        // 2. 적군들 순차적으로 1칸씩 이동
         foreach (var enemy in enemies)
         {
-            if (enemy == null) continue; // 안전 장치
-            
-            // 내 현재 위치는 이동할 것이므로 예약에서 해제
+            if (enemy == null || attackerSet.Contains(enemy)) continue;
+
             reservedTiles.Remove(enemy.currentGridPos);
 
-            GridPos bestMove = enemy.currentGridPos;
-            int minDistance = int.MaxValue;
-
-            // 상하좌우(모서리 넘기 포함) 4칸을 탐색하여 거리가 가장 작은 칸 선택
-            int[][] dirs = new int[][] { new int[]{1,0}, new int[]{-1,0}, new int[]{0,1}, new int[]{0,-1} };
-            foreach (var d in dirs)
+            // ── 폰: 카디널 BFS 1칸 이동 ──
+            if (enemy.enemyType == ChessPieceController.EnemyType.Pawn)
             {
-                GridPos neighbor = GridManager.Instance.GetNeighbor(enemy.currentGridPos, d[0], d[1]);
-                if (flowField.ContainsKey(neighbor))
+                GridPos bestMove = enemy.currentGridPos;
+                int minDist = int.MaxValue;
+                foreach (var d in cardDirs)
                 {
-                    // 이미 다른 기물이 예약(점유)한 자리는 패스!
-                    if (reservedTiles.Contains(neighbor)) continue;
+                    GridPos nb = GridManager.Instance.GetNeighbor(enemy.currentGridPos, d[0], d[1]);
+                    if (!reservedTiles.Contains(nb) && flowField.ContainsKey(nb) && flowField[nb] < minDist)
+                    { minDist = flowField[nb]; bestMove = nb; }
+                }
+                reservedTiles.Add(bestMove);
+                yield return StartCoroutine(MovePiece(enemy, bestMove));
+            }
+            // ── 비숍: 대각선 돌진 이동 ──
+            else if (enemy.enemyType == ChessPieceController.EnemyType.Bishop)
+            {
+                GridPos bestMove = enemy.currentGridPos;
+                int minDist = flowField.ContainsKey(enemy.currentGridPos) ? flowField[enemy.currentGridPos] : int.MaxValue;
 
-                    if (flowField[neighbor] < minDistance)
+                bool atEdge = enemy.currentGridPos.x == 0 || enemy.currentGridPos.x == 7 ||
+                              enemy.currentGridPos.y == 0 || enemy.currentGridPos.y == 7;
+
+                // 대각선 돌진: 같은 면 안에서 끝까지
+                foreach (var d in diagDirs)
+                {
+                    GridPos last = enemy.currentGridPos;
+                    for (int step = 1; step <= 7; step++)
                     {
-                        minDistance = flowField[neighbor];
-                        bestMove = neighbor;
+                        int nx = last.x + d[0]; int ny = last.y + d[1];
+                        if (nx < 0 || nx > 7 || ny < 0 || ny > 7) break;
+                        GridPos cand = new GridPos(enemy.currentGridPos.face, nx, ny);
+                        if (reservedTiles.Contains(cand)) break;
+                        last = cand;
+                    }
+                    if (last.Equals(enemy.currentGridPos)) continue;
+                    if (flowField.ContainsKey(last) && flowField[last] < minDist)
+                    { minDist = flowField[last]; bestMove = last; }
+                }
+
+                // 면 전환: 면 끝에 있을 때 카디널로 면 넘기
+                if (atEdge)
+                {
+                    foreach (var d in cardDirs)
+                    {
+                        int nx = enemy.currentGridPos.x + d[0];
+                        int ny = enemy.currentGridPos.y + d[1];
+                        if (nx >= 0 && nx <= 7 && ny >= 0 && ny <= 7) continue; // 면 안이면 스킵
+                        GridPos cross = GridManager.Instance.GetNeighbor(enemy.currentGridPos, d[0], d[1]);
+                        if (reservedTiles.Contains(cross)) continue;
+                        if (flowField.ContainsKey(cross) && flowField[cross] < minDist)
+                        { minDist = flowField[cross]; bestMove = cross; }
                     }
                 }
-            }
 
-            // 이동 확정 후 해당 칸을 예약 목록에 추가 (다른 동료가 이 자리로 오지 못하게 막음)
-            reservedTiles.Add(bestMove);
-
-            if (!bestMove.Equals(enemy.currentGridPos))
-            {
-                CubeFace oldFace = enemy.currentGridPos.face;
-
-                // 이동 실행
-                enemy.currentGridPos = bestMove;
-                enemy.CommitMove();
-                
-                Vector3 newNormal = GridManager.Instance.GetNormalFromFace(bestMove.face);
-                Vector3 targetPos = GridManager.Instance.GetLocalPosition(newNormal, bestMove.x, bestMove.y, enemy.board);
-                Quaternion targetRot = Quaternion.FromToRotation(Vector3.up, newNormal);
-
-                // Update()의 Lerp(보정)와 DOTween 애니메이션이 서로 충돌하며 덜덜 떨리는 현상 방지
-                enemy.isSpawning = true; 
-                enemy.transform.DOKill(); // 기존 애니메이션 강제 정지
-                
-                // 같은 면 내에서 이동할 때는 큐브 표면을 부드럽게 미끄러지게(Slide) 연출
-                if (oldFace == bestMove.face)
-                {
-                    enemy.transform.DOLocalMove(targetPos, 0.4f).SetEase(Ease.OutCubic);
-                }
-                else // 면과 면의 모서리를 넘어갈 때는 큐브 안쪽으로 파고드는 것을 방지하기 위해 아주 살짝만 점프
-                {
-                    enemy.transform.DOLocalJump(targetPos, 0.2f, 1, 0.4f).SetEase(Ease.OutCubic);
-                }
-                
-                enemy.transform.DOLocalRotateQuaternion(targetRot, 0.4f).SetEase(Ease.OutCubic);
-                
-                yield return new WaitForSeconds(0.45f); // 다음 적군 이동까지 약간 대기 (속도 상향)
-                
-                enemy.InitializeAfterSpawn(targetPos, targetRot); // 내부 물리 좌표 동기화
+                reservedTiles.Add(bestMove);
+                yield return StartCoroutine(MovePiece(enemy, bestMove));
             }
         }
 
-        yield return new WaitForSeconds(0.5f);
-        ChangeState(GameState.PlayerTurnTransition); // 적 턴 끝, 다시 플레이어 턴(트랜지션)으로
+        yield return new WaitForSeconds(0.3f);
+        ChangeState(GameState.PlayerTurnTransition);
+    }
+
+    // 기물 이동 공통 코루틴 (폰/비숍 Phase 2에서 재사용)
+    private IEnumerator MovePiece(ChessPieceController piece, GridPos bestMove)
+    {
+        if (bestMove.Equals(piece.currentGridPos)) yield break;
+
+        CubeFace oldFace = piece.currentGridPos.face;
+        piece.currentGridPos = bestMove;
+        piece.CommitMove();
+
+        Vector3 newNormal  = GridManager.Instance.GetNormalFromFace(bestMove.face);
+        Vector3 targetPos  = GridManager.Instance.GetLocalPosition(newNormal, bestMove.x, bestMove.y, piece.board);
+        Quaternion targetRot = Quaternion.FromToRotation(Vector3.up, newNormal);
+
+        piece.isSpawning = true;
+        piece.transform.DOKill();
+
+        // 비숍은 여러 칸 이동이므로 거리 비례 속도 적용
+        bool isBishop = piece.enemyType == ChessPieceController.EnemyType.Bishop;
+        if (oldFace == bestMove.face)
+        {
+            float dist = isBishop
+                ? Mathf.Abs(bestMove.x - (piece.turnStartGridPos.x)) + Mathf.Abs(bestMove.y - (piece.turnStartGridPos.y))
+                : 1f;
+            float dur = isBishop ? Mathf.Clamp(dist * 0.07f, 0.25f, 0.6f) : 0.4f;
+            piece.transform.DOLocalMove(targetPos, dur).SetEase(Ease.OutCubic);
+            piece.transform.DOLocalRotateQuaternion(targetRot, dur);
+            yield return new WaitForSeconds(dur + 0.05f);
+        }
+        else
+        {
+            piece.transform.DOLocalJump(targetPos, 0.2f, 1, 0.4f).SetEase(Ease.OutCubic);
+            piece.transform.DOLocalRotateQuaternion(targetRot, 0.4f);
+            yield return new WaitForSeconds(0.45f);
+        }
+
+        piece.InitializeAfterSpawn(targetPos, targetRot);
     }
 }
+

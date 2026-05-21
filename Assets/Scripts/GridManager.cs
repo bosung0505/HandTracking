@@ -13,7 +13,11 @@ public struct GridPos
     public override bool Equals(object obj) => obj is GridPos p && face == p.face && x == p.x && y == p.y;
     public override int GetHashCode() => (int)face * 1000 + x * 10 + y;
     public override string ToString() => $"({face}, {x}, {y})";
+
+    // "없음" 상태를 나타내는 센티널 값 (비숍 공격 스캔에서 사용)
+    public static readonly GridPos Invalid = new GridPos(CubeFace.None, -1, -1);
 }
+
 
 public class GridManager : MonoBehaviour
 {

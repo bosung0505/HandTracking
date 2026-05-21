@@ -254,7 +254,8 @@ MonoBehaviour:
   maxHP: 1
   currentHP: 1
   attackPower: 1
-  hitEffectPrefab: {fileID: 0}
+  enemyType: 0
+  hitEffectPrefab: {fileID: 4021103657954561961, guid: 5c755f9bc5253ea418e919994537dcc7, type: 3}
   slamEffectPrefab: {fileID: 2504214343621411470, guid: 3ed0d324122d7b24eaec75c55c74aafc, type: 3}
   board: {fileID: 0}
   cellSize: 0.48
@@ -263,6 +264,7 @@ MonoBehaviour:
   hoverHeight: 0.5
   dropSpeed: 25.9
   scaleSpeed: 10
+  squishScaleY: 0.2
   outlineColor: {r: 1, g: 0.28490567, b: 0.31262252, a: 1}
   outlineWidth: 0.001
   hoverIndicator: {fileID: 7296506889357137374}

@@ -45,42 +45,35 @@ public class SpawnManager : MonoBehaviour
 
     private IEnumerator SpawnSequence(int stage)
     {
-        // 스테이지 UI 표시
         if (StageManager.Instance != null) StageManager.Instance.ShowStageUI(stage);
 
-        // 1. 블랙홀 스케일 초기화 및 스폰 시작 위치 지정
-        Vector3 topCenter = topBlackHole != null ? topBlackHole.transform.localPosition : new Vector3(0, GridManager.Instance.faceDistance, 0);
+        Vector3 topCenter    = topBlackHole    != null ? topBlackHole.transform.localPosition    : new Vector3(0,  GridManager.Instance.faceDistance, 0);
         Vector3 bottomCenter = bottomBlackHole != null ? bottomBlackHole.transform.localPosition : new Vector3(0, -GridManager.Instance.faceDistance, 0);
 
         if (topBlackHole != null && bottomBlackHole != null)
         {
             topBlackHole.SetActive(true);
             bottomBlackHole.SetActive(true);
-
-            // 블랙홀 스케일링 등장 연출 (Y축은 유지하고 X, Z축만 0으로 초기화)
-            topBlackHole.transform.localScale = new Vector3(0, originalTopScale.y, 0);
+            topBlackHole.transform.localScale    = new Vector3(0, originalTopScale.y,    0);
             bottomBlackHole.transform.localScale = new Vector3(0, originalBottomScale.y, 0);
-            
-            // 원래 씬에 배치해두었던 스케일 크기대로 복원 (Y축 고정)
-            topBlackHole.transform.DOScale(new Vector3(originalTopScale.x, originalTopScale.y, originalTopScale.z), 1.5f).SetEase(Ease.OutBack);
-            bottomBlackHole.transform.DOScale(new Vector3(originalBottomScale.x, originalBottomScale.y, originalBottomScale.z), 1.5f).SetEase(Ease.OutBack);
-            
-            yield return new WaitForSeconds(1.5f); // 등장 애니메이션 대기
+            topBlackHole.transform.DOScale(originalTopScale,    1.5f).SetEase(Ease.OutBack);
+            bottomBlackHole.transform.DOScale(originalBottomScale, 1.5f).SetEase(Ease.OutBack);
+            yield return new WaitForSeconds(1.5f);
         }
 
-        // 2. 기물 생성
-        List<Vector2Int> spawnCoords = GetPerimeterCoordinates();
-        
-        // --- 플레이어 기물 생성 (윗면, 고정 1개) ---
+        // --- 플레이어 기물 생성 (의 색 기죽 파악용) ---
+        List<Vector2Int> spawnCoords  = GetPerimeterCoordinates();
         List<Vector2Int> playerCoords = new List<Vector2Int>(spawnCoords);
         Shuffle(playerCoords);
-        SpawnPiece(playerPiecePrefab, Vector3.up, playerCoords[0], topCenter, true);
+        Vector2Int playerSpawnCoord = playerCoords[0]; // 비숙 색 판단에 사용
+        SpawnPiece(playerPiecePrefab, Vector3.up, playerSpawnCoord, topCenter, true);
         yield return new WaitForSeconds(0.2f);
 
-        // --- 적군 기물 생성 (스테이지 데이터 비례) ---
+        // --- 적군 기물 생성 ---
         List<Vector2Int> enemyCoords = new List<Vector2Int>(spawnCoords);
         Shuffle(enemyCoords);
         int coordIndex = 0;
+        int playerParity = (playerSpawnCoord.x + playerSpawnCoord.y) % 2; // 0=짝수색, 1=홀수색
 
         if (StageManager.Instance != null)
         {
@@ -89,12 +82,30 @@ public class SpawnManager : MonoBehaviour
             {
                 foreach (var enemyData in stageData.enemies)
                 {
+                    // 비숙 종류 판단 (프리팩의 enemyType으로)
+                    bool isBishop = enemyData.enemyPrefab != null &&
+                                    enemyData.enemyPrefab.GetComponent<ChessPieceController>() != null &&
+                                    enemyData.enemyPrefab.GetComponent<ChessPieceController>().enemyType
+                                        == ChessPieceController.EnemyType.Bishop;
+
                     for (int i = 0; i < enemyData.count; i++)
                     {
-                        if (coordIndex >= enemyCoords.Count) break; // 최대 12칸 안전장치
-                        
-                        SpawnPiece(enemyData.enemyPrefab, Vector3.down, enemyCoords[coordIndex], bottomCenter, false);
-                        coordIndex++;
+                        if (coordIndex >= enemyCoords.Count) break;
+
+                        if (isBishop)
+                        {
+                            // 비숙: 플레이어와 다른 색(x+y 홈짝) 좌표를 각각 1개씩 찾아 생성
+                            // i==0 이면 동색(올 수 있음), i==1 이면 다른 색
+                            int targetParity = (i % 2 == 0) ? playerParity : 1 - playerParity;
+                            Vector2Int bishopCoord = FindCoordWithParity(enemyCoords, coordIndex, targetParity);
+                            SpawnPiece(enemyData.enemyPrefab, Vector3.down, bishopCoord, bottomCenter, false);
+                            coordIndex++;
+                        }
+                        else
+                        {
+                            SpawnPiece(enemyData.enemyPrefab, Vector3.down, enemyCoords[coordIndex], bottomCenter, false);
+                            coordIndex++;
+                        }
                         yield return new WaitForSeconds(0.2f);
                     }
                 }
@@ -102,9 +113,7 @@ public class SpawnManager : MonoBehaviour
         }
         else
         {
-            // StageManager가 없을 경우를 대비한 기존 로직 유지
-            int enemyCount = stage; 
-            if (enemyCount > 12) enemyCount = 12; 
+            int enemyCount = Mathf.Min(stage, 12);
             for (int i = 0; i < enemyCount; i++)
             {
                 SpawnPiece(enemyPiecePrefab, Vector3.down, enemyCoords[i], bottomCenter, false);
@@ -112,22 +121,16 @@ public class SpawnManager : MonoBehaviour
             }
         }
 
-        // 마지막 기물이 착지할 때까지 대기
         yield return new WaitForSeconds(jumpDuration + 0.5f);
 
-        // 3. 블랙홀 사라짐 연출 (Y축 유지, X/Z축만 0으로 축소)
         if (topBlackHole != null && bottomBlackHole != null)
         {
-            topBlackHole.transform.DOScale(new Vector3(0, originalTopScale.y, 0), 1.0f).SetEase(Ease.InBack).OnComplete(() => topBlackHole.SetActive(false));
+            topBlackHole.transform.DOScale(new Vector3(0, originalTopScale.y, 0),    1.0f).SetEase(Ease.InBack).OnComplete(() => topBlackHole.SetActive(false));
             bottomBlackHole.transform.DOScale(new Vector3(0, originalBottomScale.y, 0), 1.0f).SetEase(Ease.InBack).OnComplete(() => bottomBlackHole.SetActive(false));
         }
-
         yield return new WaitForSeconds(1.0f);
 
-        // 스테이지 UI 숨기기
         if (StageManager.Instance != null) StageManager.Instance.HideStageUI();
-
-        // 4. 스폰 시퀀스 종료 및 턴 전환 연출 시작
         GameManager.Instance.ChangeState(GameState.PlayerTurnTransition);
     }
 
@@ -165,26 +168,28 @@ public class SpawnManager : MonoBehaviour
         });
     }
 
-    // 중앙 2x2를 둘러싸는 4x4 테두리(12칸) 좌표 목록 반환
+    // 중앙 2x2를 둘러싼 4x4 테두리(12칸) 좌표 목록 반환
     private List<Vector2Int> GetPerimeterCoordinates()
     {
         List<Vector2Int> coords = new List<Vector2Int>();
-        // 8x8 보드에서 중앙은 (3,3), (3,4), (4,3), (4,4)
-        // 이를 감싸는 테두리는 X: 2~5, Y: 2~5 중 테두리에 해당하는 좌표
         for (int x = 2; x <= 5; x++)
-        {
             for (int y = 2; y <= 5; y++)
-            {
                 if (x == 2 || x == 5 || y == 2 || y == 5)
-                {
                     coords.Add(new Vector2Int(x, y));
-                }
-            }
-        }
         return coords;
     }
 
-    // 리스트 무작위 섞기 알고리즘
+    // 주어진 인덱스 이후의 주어진 홈짝(parity)에 맞는 첫 번째 좌표 반환 (비숙 색 필터)
+    private Vector2Int FindCoordWithParity(List<Vector2Int> coords, int startIndex, int parity)
+    {
+        for (int i = startIndex; i < coords.Count; i++)
+            if ((coords[i].x + coords[i].y) % 2 == parity)
+                return coords[i];
+        // 폰지못하면 시작 인덱스로 폴백
+        return coords[Mathf.Min(startIndex, coords.Count - 1)];
+    }
+
+    // 리스트 무작위 섬기 알고리즘
     private void Shuffle<T>(List<T> list)
     {
         for (int i = 0; i < list.Count; i++)

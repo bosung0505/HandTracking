@@ -39,6 +39,10 @@ public class StageManager : MonoBehaviour
     [Tooltip("Opponent's Turn 알림 UI 패널의 CanvasGroup")]
     public CanvasGroup opponentTurnUIGroup;
 
+    [Header("Game Over UI Settings")]
+    [Tooltip("GAME OVER UI 패널의 CanvasGroup")]
+    public CanvasGroup gameOverUIGroup;
+
     private void Awake()
     {
         if (Instance == null) Instance = this;
@@ -59,6 +63,11 @@ public class StageManager : MonoBehaviour
         {
             opponentTurnUIGroup.alpha = 0f;
             opponentTurnUIGroup.gameObject.SetActive(false);
+        }
+        if (gameOverUIGroup != null)
+        {
+            gameOverUIGroup.alpha = 0f;
+            gameOverUIGroup.gameObject.SetActive(false);
         }
     }
 
@@ -113,8 +122,29 @@ public class StageManager : MonoBehaviour
         CanvasGroup targetGroup = isPlayerTurn ? myTurnUIGroup : opponentTurnUIGroup;
         if (targetGroup != null)
         {
-            targetGroup.DOFade(0f, 0.3f).OnComplete(() => {
+            targetGroup.DOFade(0f, 0.3f).OnComplete(() =>
+            {
                 targetGroup.gameObject.SetActive(false);
+            });
+        }
+    }
+
+    public void ShowGameOverUI()
+    {
+        if (gameOverUIGroup != null)
+        {
+            gameOverUIGroup.gameObject.SetActive(true);
+            gameOverUIGroup.DOFade(1f, 0.5f);
+        }
+    }
+
+    public void HideGameOverUI()
+    {
+        if (gameOverUIGroup != null)
+        {
+            gameOverUIGroup.DOFade(0f, 0.5f).OnComplete(() =>
+            {
+                gameOverUIGroup.gameObject.SetActive(false);
             });
         }
     }

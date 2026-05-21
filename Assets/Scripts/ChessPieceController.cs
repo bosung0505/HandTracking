@@ -20,6 +20,10 @@ public class ChessPieceController : MonoBehaviour
     public int maxHP = 1;
     public int currentHP = 1;
     public int attackPower = 1;
+
+    public enum EnemyType { Pawn, Bishop }
+    [Tooltip("적 기물 종류 (플레이어 기물에는 무시됨)")]
+    public EnemyType enemyType = EnemyType.Pawn;
     
     [Header("Combat Effects (Prefabs)")]
     public GameObject hitEffectPrefab;
@@ -450,24 +454,30 @@ public class ChessPieceController : MonoBehaviour
 
         if (currentHP <= 0)
         {
-            // 사망 시: 밀려나고 서서히 투명해지며 파괴
             Sequence seq = DOTween.Sequence();
             seq.Append(transform.DOLocalMove(punchPos, 0.2f).SetEase(Ease.OutExpo));
-            
-            // 알파값 페이드 아웃 (Material이 투명도를 지원해야 함)
-            Renderer[] renderers = GetComponentsInChildren<Renderer>();
-            foreach (var r in renderers)
+
+            if (isPlayerPiece)
             {
-                if (r.material.HasProperty("_Color"))
+                // 플레이어 사망: 넉백 후 게임 오버 전환
+                seq.AppendInterval(0.3f);
+                seq.OnComplete(() =>
                 {
-                    r.material.DOFade(0f, 0.5f);
-                }
+                    GameManager.Instance.ChangeState(GameState.GameOver);
+                });
             }
-            
-            seq.AppendInterval(0.5f);
-            seq.OnComplete(() => {
-                Destroy(gameObject);
-            });
+            else
+            {
+                // 적 사망: 페이드 아웃 후 파괴
+                Renderer[] renderers = GetComponentsInChildren<Renderer>();
+                foreach (var r in renderers)
+                {
+                    if (r.material.HasProperty("_Color"))
+                        r.material.DOFade(0f, 0.5f);
+                }
+                seq.AppendInterval(0.5f);
+                seq.OnComplete(() => Destroy(gameObject));
+            }
         }
         else
         {
@@ -523,17 +533,37 @@ public class ChessPieceController : MonoBehaviour
     // 스테이지 클리어 시 솟구쳐 오르며 사라지는 연출
     public void RocketLaunchAndDestroy()
     {
-        isSpawning = true; // Update 루프의 위치 보정 정지
-        if (pieceCollider != null) pieceCollider.enabled = false; // 선택 및 물리 방지
-        
+        isSpawning = true;
+        if (pieceCollider != null) pieceCollider.enabled = false;
         transform.DOKill();
-        
-        // 위로 아주 높이 발사 (현재 큐브 면의 수직 방향으로 20만큼)
-        Vector3 targetPos = baseLocalPosition + (currentLocalNormal * 20f); 
-        
-        // 처음엔 천천히, 나중엔 급가속 (InExpo)
-        transform.DOLocalMove(targetPos, 1.5f).SetEase(Ease.InExpo).OnComplete(() => {
-            Destroy(gameObject);
-        });
+        Vector3 targetPos = baseLocalPosition + (currentLocalNormal * 20f);
+        transform.DOLocalMove(targetPos, 1.5f).SetEase(Ease.InExpo).OnComplete(() => Destroy(gameObject));
+    }
+
+    // 폰 박치기 공격 애니메이션 (예비동작 → 박치기 → 복귀)
+    public void PerformAttackAnimation(Vector3 playerLocalPos)
+    {
+        isSpawning = true;
+        transform.DOKill();
+
+        Vector3 myPos = baseLocalPosition;
+
+        // 플레이어 방향 벡터 (큐브 면 평면에 투영)
+        Vector3 toPlayer = playerLocalPos - myPos;
+        toPlayer -= Vector3.Project(toPlayer, currentLocalNormal);
+        toPlayer.Normalize();
+
+        // 각 단계별 목표 위치
+        Vector3 liftPos    = myPos + currentLocalNormal * 0.35f;           // 1. 살짝 위로 뜸
+        Vector3 windupPos  = liftPos - toPlayer * 0.3f;                    // 2. 반대 방향으로 예비 동작
+        Vector3 strikePos  = myPos + toPlayer * 0.45f + currentLocalNormal * 0.1f; // 3. 박치기!
+
+        Sequence seq = DOTween.Sequence();
+        seq.Append(transform.DOLocalMove(liftPos,   0.18f).SetEase(Ease.OutQuad));  // 뜸
+        seq.Append(transform.DOLocalMove(windupPos, 0.15f).SetEase(Ease.OutQuad));  // 예비 동작
+        seq.Append(transform.DOLocalMove(strikePos, 0.10f).SetEase(Ease.InExpo));   // 박치기!
+        seq.AppendInterval(0.05f);
+        seq.Append(transform.DOLocalMove(myPos,     0.22f).SetEase(Ease.OutBack));  // 원위치 복귀
+        seq.OnComplete(() => isSpawning = false);
     }
 }
