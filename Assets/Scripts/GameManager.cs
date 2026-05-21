@@ -85,44 +85,11 @@ public class GameManager : MonoBehaviour
     {
         if (currentState != GameState.PlayerTurn) return;
 
-        ChessPieceController player = null;
+        // CommitMove 처리 후 바로 PlayerAttacking 상태로 전환
+        // (실제 공격 연출과 데미지는 PlayerAttackRoutine 코루틴에서 일괄 처리)
         foreach (var p in FindObjectsOfType<ChessPieceController>())
-            if (p.isPlayerPiece) { player = p; p.CommitMove(); }
+            if (p.isPlayerPiece) p.CommitMove();
 
-        // PlayerAttackRoutine이 공격 연출 + 상태 전환을 처리함
-        if (player != null && PlayerStats.Instance != null)
-            AttackEnemiesInRange(player.currentGridPos,
-                PlayerStats.Instance.attackPower,
-                PlayerStats.Instance.attackRange);
-
-        StartCoroutine(CheckAfterAttack());
-    }
-
-    private IEnumerator CheckAfterAttack()
-    {
-        // PlayerAttackRoutine이 실행 중이면 완료될 때까지 대기
-        while (currentState == GameState.PlayerAttacking)
-            yield return null;
-
-        // PlayerAttackRoutine이 이미 다음 상태(EnemyTurnTransition/StageClear)로
-        // 전환했으면 중복 처리하지 않음
-        if (currentState == GameState.EnemyTurnTransition ||
-            currentState == GameState.EnemyTurn          ||
-            currentState == GameState.StageClear         ||
-            currentState == GameState.GameOver)
-            yield break;
-
-        // 안전망: PlayerAttacking 상태를 거치지 않은 경우 직접 처리
-        yield return new WaitForSeconds(0.5f);
-        if (AreAllEnemiesDefeated()) ChangeState(GameState.StageClear);
-        else ChangeState(GameState.EnemyTurn);
-    }
-
-    // ── 플레이어 공격 ────────────────────────────────────────────
-
-    private void AttackEnemiesInRange(GridPos attackerPos, int power, int range)
-    {
-        // PlayerAttackRoutine(내려찍기 연출)이 실제 공격 범위 계산 및 데미지를 처리함
         ChangeState(GameState.PlayerAttacking);
     }
 
@@ -134,12 +101,9 @@ public class GameManager : MonoBehaviour
 
         foreach (var p in allPieces)
         {
+            if (p == null) continue;
             if (p.isPlayerPiece) player = p;
-            else
-            {
-                EnemyController ec = p.GetComponent<EnemyController>();
-                if (ec == null || !ec.isDead) enemies.Add(p);
-            }
+            else if (p.currentHP > 0) enemies.Add(p); // currentHP > 0 인 살아있는 적만
         }
 
         if (player == null)
@@ -148,10 +112,8 @@ public class GameManager : MonoBehaviour
             yield break;
         }
 
-        // 플레이어 이동 확정 (턴 시작 위치를 현재 위치로 갱신)
-        player.CommitMove();
-
         // 1. 내려찍기 연출 (DOTween)
+        // OnEndTurnButtonClicked에서 CommitMove를 이미 처리했으므로 여기서는 생략
         player.isSpawning = true; // Update 루프 보간 차단 (애니메이션 충돌 방지)
         Vector3 originalLocalPos = player.transform.localPosition;
 
@@ -179,22 +141,32 @@ public class GameManager : MonoBehaviour
         // 3. 0.5초 대기
         yield return new WaitForSeconds(0.5f);
 
-        // 4. 수직 방향 4칸(상하좌우 십자) + 플레이어 자신의 위치 포함 (총 5칸) 범위 탐색
+        // 4. 공격 타일 계산: 플레이어 위치 중심 십자(+) 5칸
+        //    단, GetNeighbor는 면을 넘어갈 수 있으므로 같은 면 타일만 추가
         List<GridPos> attackTiles = new List<GridPos>();
         attackTiles.Add(player.currentGridPos); // 중앙(플레이어 위치) 포함
 
         int[][] dirs = new int[][] { new int[]{1,0}, new int[]{-1,0}, new int[]{0,1}, new int[]{0,-1} };
         foreach (var d in dirs)
         {
-            GridPos neighbor = GridManager.Instance.GetNeighbor(player.currentGridPos, d[0], d[1]);
-            attackTiles.Add(neighbor);
+            int nx = player.currentGridPos.x + d[0];
+            int ny = player.currentGridPos.y + d[1];
+            if (nx >= 0 && nx <= 7 && ny >= 0 && ny <= 7)
+            {
+                // 같은 면 안의 칸만 공격 범위에 포함
+                attackTiles.Add(new GridPos(player.currentGridPos.face, nx, ny));
+            }
         }
 
         bool hitAnyEnemy = false;
 
-        // 5. 범위 내 적에게 데미지 부여
+        // 5. 범위 내 적에게 데미지 부여 (같은 면에 있는 적만)
         foreach (var enemy in enemies)
         {
+            if (enemy == null) continue;
+            // 면이 다르면 타격 불가
+            if (enemy.currentGridPos.face != player.currentGridPos.face) continue;
+
             if (attackTiles.Contains(enemy.currentGridPos))
             {
                 if (enemy.currentGridPos.Equals(player.currentGridPos))
@@ -221,11 +193,12 @@ public class GameManager : MonoBehaviour
             yield return new WaitForSeconds(0.2f); // 타격된 적이 없을 시 짧은 대기
         }
 
-        // --- 여기서 살아남은 적 확인 ---
+        // --- 살아남은 적 재확인 (데미지 후 currentHP 기준) ---
         bool enemyAlive = false;
-        foreach (var enemy in enemies)
+        foreach (var p in FindObjectsOfType<ChessPieceController>())
         {
-            if (enemy != null && enemy.currentHP > 0)
+            if (p == null || p.isPlayerPiece) continue;
+            if (p.currentHP > 0)
             {
                 enemyAlive = true;
                 break;
@@ -233,13 +206,9 @@ public class GameManager : MonoBehaviour
         }
 
         if (!enemyAlive)
-        {
             ChangeState(GameState.StageClear);
-        }
         else
-        {
             ChangeState(GameState.EnemyTurnTransition);
-        }
     }
 
     // ── 업그레이드 완료 콜백 (UpgradePanelUI에서 호출) ──────────
@@ -261,10 +230,9 @@ public class GameManager : MonoBehaviour
 
         foreach (var p in allPieces)
         {
+            if (p == null) continue;
             if (p.isPlayerPiece) player = p;
-            else if (p != null && p.currentHP > 0)
-                enemies.Add(p);
-        }
+            else if (p.currentHP > 0) enemies.Add(p); // HP 남아있는 적만 (죽은 기물은 제외)
 
         if (player == null) { ChangeState(GameState.PlayerTurn); yield break; }
 
