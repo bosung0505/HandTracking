@@ -141,20 +141,31 @@ public class GameManager : MonoBehaviour
         // 3. 0.5초 대기
         yield return new WaitForSeconds(0.5f);
 
-        // 4. 공격 타일 계산: 플레이어 위치 중심 십자(+) 5칸
-        //    단, GetNeighbor는 면을 넘어갈 수 있으므로 같은 면 타일만 추가
+        // 4. PlayerStats 업그레이드 반영: 공격력 / 사거리 / 퀸(대각선)
+        int atkPower = PlayerStats.Instance != null ? PlayerStats.Instance.attackPower : player.attackPower;
+        int atkRange  = PlayerStats.Instance != null ? PlayerStats.Instance.attackRange : 1;
+        bool isQueen  = PlayerStats.Instance != null && PlayerStats.Instance.isQueen;
+
+        // 공격 타일 계산 (중앙 + 사거리 범위 내 직선, 퀸이면 대각선도 추가)
         List<GridPos> attackTiles = new List<GridPos>();
         attackTiles.Add(player.currentGridPos); // 중앙(플레이어 위치) 포함
 
-        int[][] dirs = new int[][] { new int[]{1,0}, new int[]{-1,0}, new int[]{0,1}, new int[]{0,-1} };
-        foreach (var d in dirs)
+        int[][] cardDirs = new int[][] { new int[]{1,0}, new int[]{-1,0}, new int[]{0,1}, new int[]{0,-1} };
+        int[][] diagDirs = new int[][] { new int[]{1,1}, new int[]{1,-1}, new int[]{-1,1}, new int[]{-1,-1} };
+
+        List<int[]> attackDirs = new List<int[]>(cardDirs);
+        if (isQueen) attackDirs.AddRange(diagDirs); // 퀸: 8방향 공격
+
+        foreach (var d in attackDirs)
         {
-            int nx = player.currentGridPos.x + d[0];
-            int ny = player.currentGridPos.y + d[1];
-            if (nx >= 0 && nx <= 7 && ny >= 0 && ny <= 7)
+            for (int r = 1; r <= atkRange; r++)
             {
-                // 같은 면 안의 칸만 공격 범위에 포함
-                attackTiles.Add(new GridPos(player.currentGridPos.face, nx, ny));
+                int nx = player.currentGridPos.x + d[0] * r;
+                int ny = player.currentGridPos.y + d[1] * r;
+                if (nx >= 0 && nx <= 7 && ny >= 0 && ny <= 7)
+                    attackTiles.Add(new GridPos(player.currentGridPos.face, nx, ny));
+                else
+                    break;
             }
         }
 
@@ -164,21 +175,14 @@ public class GameManager : MonoBehaviour
         foreach (var enemy in enemies)
         {
             if (enemy == null) continue;
-            // 면이 다르면 타격 불가
             if (enemy.currentGridPos.face != player.currentGridPos.face) continue;
 
             if (attackTiles.Contains(enemy.currentGridPos))
             {
                 if (enemy.currentGridPos.Equals(player.currentGridPos))
-                {
-                    // 룩 밑에 깔린 적은 넉백 없이 압사 연출
                     enemy.TakeFatalDamage();
-                }
                 else
-                {
-                    // 주변 칸의 적은 기존처럼 넉백
-                    enemy.TakeDamage(player.attackPower, player.transform.localPosition);
-                }
+                    enemy.TakeDamage(atkPower, player.transform.localPosition);
                 hitAnyEnemy = true;
             }
         }
@@ -212,11 +216,12 @@ public class GameManager : MonoBehaviour
     }
 
     // ── 업그레이드 완료 콜백 (UpgradePanelUI에서 호출) ──────────
-    // [팀원 추가] 업그레이드 선택 후 다음 스테이지로 진행하는 콜백
+    // StageClearRoutine에서 currentStage++ 후 UpgradePanelUI.ShowUpgradePanel()을 호출하고,
+    // 업그레이드 선택이 끝나면 UpgradePanelUI가 이 메서드를 호출해 다음 스테이지 스폰을 시작.
 
     public void OnUpgradeComplete()
     {
-        currentStage++;
+        // currentStage는 StageClearRoutine에서 이미 증가시켰으므로 여기서는 스폰만 진행
         ChangeState(GameState.SpawningPieces);
     }
 
@@ -263,7 +268,11 @@ public class GameManager : MonoBehaviour
                 attackerSet.Add(enemy);
                 enemy.PerformAttackAnimation(player.transform.localPosition);
                 yield return new WaitForSeconds(0.43f);
-                if (player != null && player.currentHP > 0)
+                // 플레이어 HP 체크는 PlayerStats 기준 (HP 바 연동)
+                bool playerAlive = PlayerStats.Instance != null
+                    ? PlayerStats.Instance.currentHp > 0
+                    : player != null && player.currentHP > 0;
+                if (playerAlive)
                     player.TakeDamage(enemy.attackPower, enemy.transform.localPosition);
                 yield return new WaitForSeconds(0.5f);
                 if (currentState == GameState.GameOver) yield break;
@@ -293,6 +302,7 @@ public class GameManager : MonoBehaviour
                 attackerSet.Add(enemy);
 
                 // 1. launchPos까지 슬라이드
+
                 Vector3 launchNormal = GridManager.Instance.GetNormalFromFace(launchPos.face);
                 Vector3 launchLocalPos = GridManager.Instance.GetLocalPosition(launchNormal, launchPos.x, launchPos.y, enemy.board);
                 Quaternion launchRot = Quaternion.FromToRotation(Vector3.up, launchNormal);
@@ -307,7 +317,10 @@ public class GameManager : MonoBehaviour
                 // 2. 박치기
                 enemy.PerformAttackAnimation(player.transform.localPosition);
                 yield return new WaitForSeconds(0.43f);
-                if (player != null && player.currentHP > 0)
+                bool playerAliveB = PlayerStats.Instance != null
+                    ? PlayerStats.Instance.currentHp > 0
+                    : player != null && player.currentHP > 0;
+                if (playerAliveB)
                     player.TakeDamage(enemy.attackPower, enemy.transform.localPosition);
                 yield return new WaitForSeconds(0.5f);
                 if (currentState == GameState.GameOver) yield break;
@@ -455,6 +468,7 @@ public class GameManager : MonoBehaviour
     {
         Debug.Log("=== 스테이지 클리어! ===");
 
+        // 1. 플레이어 로켓 승천 연출
         ChessPieceController[] allPieces = FindObjectsByType<ChessPieceController>(FindObjectsSortMode.None);
         ChessPieceController player = null;
         foreach (var p in allPieces)
@@ -468,6 +482,7 @@ public class GameManager : MonoBehaviour
             yield return new WaitForSeconds(2.0f);
         }
 
+        // 2. 보드 회전 초기화
         BoardRotator rotator = FindObjectOfType<BoardRotator>();
         if (rotator != null)
         {
@@ -475,11 +490,24 @@ public class GameManager : MonoBehaviour
             yield return new WaitForSeconds(1.5f);
         }
 
-        // [팀원 추가] 스테이지 클리어 시 플레이어 HP 전체 회복
+        // 3. 스테이지 번호 증가 + HP 회복
+        //    (OnUpgradeComplete는 스테이지 증가 없이 SpawningPieces만 호출)
+        currentStage++;
         PlayerStats.Instance?.FullHeal();
 
-        currentStage++;
-        ChangeState(GameState.SpawningPieces);
+        // 4. 업그레이드 패널 표시
+        //    UpgradePanelUI가 Time.timeScale=0으로 일시정지 후,
+        //    선택 완료 시 OnUpgradeComplete()→ChangeState(SpawningPieces) 호출함
+        if (UpgradePanelUI.Instance != null)
+        {
+            UpgradePanelUI.Instance.ShowUpgradePanel(currentStage - 1); // 방금 클리어한 스테이지 번호 표시
+        }
+        else
+        {
+            // 업그레이드 패널이 씬에 없으면 바로 다음 스테이지 시작 (fallback)
+            Debug.LogWarning("[GameManager] UpgradePanelUI.Instance가 null입니다. 씬에 UpgradePanelUI 오브젝트를 확인하세요.");
+            ChangeState(GameState.SpawningPieces);
+        }
     }
 
     private IEnumerator GameOverRoutine()
