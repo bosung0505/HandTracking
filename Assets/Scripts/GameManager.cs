@@ -233,6 +233,7 @@ public class GameManager : MonoBehaviour
             if (p == null) continue;
             if (p.isPlayerPiece) player = p;
             else if (p.currentHP > 0) enemies.Add(p); // HP 남아있는 적만 (죽은 기물은 제외)
+        }
 
         if (player == null) { ChangeState(GameState.PlayerTurn); yield break; }
 
